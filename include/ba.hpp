@@ -12,8 +12,11 @@
 
 #include "tools.hpp"
 
-#define WIN_SIZE 10
-#define GAP 5
+// Runtime parameters loaded before hierarchy construction; defaults preserve upstream runs.
+inline int WIN_SIZE = 10;
+inline int GAP = 5;
+inline int HBA_INNER_MAX_ITER = 10;
+inline double HBA_INITIAL_DAMPING = 0.01;
 #define AVG_THR
 #define FULL_HESS
 // #define ENABLE_RVIZ
@@ -623,7 +626,7 @@ public:
   void damping_iter(vector<IMUST>& x_stats, VOX_HESS& voxhess, double& residual,
                     PLV(6)& hess_vec, size_t& mem_cost)
   {
-    double u = 0.01, v = 2;
+    double u = HBA_INITIAL_DAMPING, v = 2;
     Eigen::MatrixXd D(jac_leng, jac_leng), Hess(jac_leng, jac_leng),
                     HessuD(jac_leng, jac_leng);
     Eigen::VectorXd JacT(jac_leng), dxi(jac_leng), new_dxi(jac_leng);
@@ -645,7 +648,7 @@ public:
     double solvtime = 0;
     size_t max_mem = 0;
     double loop_num = 0;
-    for(int i = 0; i < 10; i++)
+    for(int i = 0; i < HBA_INNER_MAX_ITER; i++)
     {
       if(is_calc_hess)
       {

@@ -13,6 +13,7 @@
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/slam/PriorFactor.h>
 #include <gtsam/slam/BetweenFactor.h>
+#include <gtsam/linear/NoiseModel.h>
 #include <gtsam/nonlinear/Values.h>
 #include <gtsam/nonlinear/ISAM2.h>
 
@@ -26,6 +27,7 @@ public:
   int pose_size, layer_num, max_iter, part_length, left_size, left_h_size, j_upper, tail, thread_num,
     gap_num, last_win_size, left_gap_num;
   double downsample_size, voxel_size, eigen_ratio, reject_ratio;
+  double convergence_ratio = 0.05, keyframe_downsample_size = 0.05;
   
   std::string data_path;
   vector<mypcl::pose> pose_vec;
@@ -124,15 +126,25 @@ public:
 class HBA
 {
 public:
-  int thread_num, total_layer_num;
+  int thread_num, total_layer_num, pose_prior_stride;
+  bool enable_pose_prior;
+  double pose_prior_translation_sigma, pose_prior_rotation_sigma, pose_prior_huber_delta;
   std::vector<LAYER> layers;
+  std::vector<mypcl::pose> reference_pose;
   std::string data_path;
 
-  HBA(int total_layer_num_, std::string data_path_, int thread_num_)
+  HBA(int total_layer_num_, std::string data_path_, int thread_num_, bool enable_pose_prior_,
+      int pose_prior_stride_, double pose_prior_translation_sigma_,
+      double pose_prior_rotation_sigma_, double pose_prior_huber_delta_)
   {
     total_layer_num = total_layer_num_;
     thread_num = thread_num_;
     data_path = data_path_;
+    enable_pose_prior = enable_pose_prior_;
+    pose_prior_stride = pose_prior_stride_;
+    pose_prior_translation_sigma = pose_prior_translation_sigma_;
+    pose_prior_rotation_sigma = pose_prior_rotation_sigma_;
+    pose_prior_huber_delta = pose_prior_huber_delta_;
 
     layers.resize(total_layer_num);
     for(int i = 0; i < total_layer_num; i++)
@@ -142,6 +154,7 @@ public:
     }
     layers[0].data_path = data_path;
     layers[0].pose_vec = mypcl::read_pose(data_path + "pose.json");
+    reference_pose = layers[0].pose_vec;
     layers[0].init_parameter();
     layers[0].init_storage(total_layer_num);
 
@@ -196,6 +209,23 @@ public:
     {
       if(i > 0) initial.insert(i, gtsam::Pose3(gtsam::Rot3(init_pose[i].q.toRotationMatrix()), gtsam::Point3(init_pose[i].t)));
 
+      if(enable_pose_prior && i > 0 &&
+         (i % pose_prior_stride == 0 || i + 1 == init_pose.size()))
+      {
+        gtsam::Vector prior_sigmas(6);
+        prior_sigmas << pose_prior_rotation_sigma, pose_prior_rotation_sigma, pose_prior_rotation_sigma,
+                        pose_prior_translation_sigma, pose_prior_translation_sigma, pose_prior_translation_sigma;
+        gtsam::noiseModel::Diagonal::shared_ptr diagonal =
+          gtsam::noiseModel::Diagonal::Sigmas(prior_sigmas);
+        gtsam::SharedNoiseModel model = diagonal;
+        if(pose_prior_huber_delta > 0)
+          model = gtsam::noiseModel::Robust::Create(
+            gtsam::noiseModel::mEstimator::Huber::Create(pose_prior_huber_delta), diagonal);
+        graph.add(gtsam::PriorFactor<gtsam::Pose3>(
+          i, gtsam::Pose3(gtsam::Rot3(reference_pose[i].q.toRotationMatrix()),
+                          gtsam::Point3(reference_pose[i].t)), model));
+      }
+
       if(i%GAP == 0 && cnt < init_cov.size())
         for(int j = 0; j < WIN_SIZE-1; j++)
           for(int k = j+1; k < WIN_SIZE; k++)
@@ -220,6 +250,12 @@ public:
             graph.push_back(factor);
           }
     }
+
+    if(enable_pose_prior)
+      cout << "pose priors: stride " << pose_prior_stride
+           << " | translation sigma " << pose_prior_translation_sigma
+           << " m | rotation sigma " << pose_prior_rotation_sigma
+           << " rad | Huber delta " << pose_prior_huber_delta << endl;
 
     int pose_size = upper_pose.size();
     cnt = 0;

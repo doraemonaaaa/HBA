@@ -134,7 +134,7 @@ void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer)
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         delete iter->second;
       
-      if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
+      if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < layer.convergence_ratio || loop == layer.max_iter-1)
       {
         if(layer.mem_costs[thread_id] < mem_cost) layer.mem_costs[thread_id] = mem_cost;
         
@@ -158,7 +158,7 @@ void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer)
       mypcl::transform_pointcloud(*src_pc[j], *pc_oneframe, t_tmp, q_tmp);
       pc_keyframe = mypcl::append_cloud(pc_keyframe, *pc_oneframe);
     }
-    downsample_voxel(*pc_keyframe, 0.05);
+    downsample_voxel(*pc_keyframe, layer.keyframe_downsample_size);
     next_layer.pcds[i] = pc_keyframe;
   }
 }
@@ -253,7 +253,7 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         delete iter->second;
             
-      if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
+      if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < layer.convergence_ratio || loop == layer.max_iter-1)
       {
         if(layer.mem_costs[thread_id] < mem_cost) layer.mem_costs[thread_id] = mem_cost;
 
@@ -281,7 +281,7 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       save_t += ros::Time::now().toSec()-t1;
     }
     t0 = ros::Time::now().toSec();
-    downsample_voxel(*pc_keyframe, 0.05);
+    downsample_voxel(*pc_keyframe, layer.keyframe_downsample_size);
     dsp_t += ros::Time::now().toSec()-t0;
 
     t0 = ros::Time::now().toSec();
@@ -349,7 +349,7 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         delete iter->second;
       
-      if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
+      if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < layer.convergence_ratio || loop == layer.max_iter-1)
       {
         if(layer.mem_costs[thread_id] < mem_cost) layer.mem_costs[thread_id] = mem_cost;
 
@@ -373,7 +373,7 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       mypcl::transform_pointcloud(*src_pc[j], *pc_oneframe, t_tmp, q_tmp);
       pc_keyframe = mypcl::append_cloud(pc_keyframe, *pc_oneframe);
     }
-    downsample_voxel(*pc_keyframe, 0.05);
+    downsample_voxel(*pc_keyframe, layer.keyframe_downsample_size);
     next_layer.pcds[i] = pc_keyframe;
   }
   printf("total time: %.2fs\n", total_t);
@@ -444,7 +444,7 @@ void global_ba(LAYER& layer)
     cout<<"Residual absolute: "<<abs(residual_pre-residual_cur)<<" | "
       <<"percentage: "<<abs(residual_pre-residual_cur)/abs(residual_cur)<<endl;
     
-    if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
+    if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < layer.convergence_ratio || loop == layer.max_iter-1)
     {
       if(max_mem < mem_cost) max_mem = mem_cost;
       #ifdef FULL_HESS
@@ -497,15 +497,59 @@ int main(int argc, char** argv)
 	ros::init(argc, argv, "hba");
 	ros::NodeHandle nh("~");
 
-  int total_layer_num, thread_num;
+  int total_layer_num, thread_num, pose_prior_stride;
+  bool enable_pose_prior;
+  double pose_prior_translation_sigma, pose_prior_rotation_sigma, pose_prior_huber_delta;
   string data_path;
 
   nh.getParam("total_layer_num", total_layer_num);
   nh.getParam("pcd_name_fill_num", pcd_name_fill_num);
   nh.getParam("data_path", data_path);
   nh.getParam("thread_num", thread_num);
+  nh.param<bool>("enable_pose_prior", enable_pose_prior, false);
+  nh.param<int>("pose_prior_stride", pose_prior_stride, 10);
+  nh.param<double>("pose_prior_translation_sigma", pose_prior_translation_sigma, 0.20);
+  nh.param<double>("pose_prior_rotation_sigma", pose_prior_rotation_sigma, 0.008726646259971648);
+  nh.param<double>("pose_prior_huber_delta", pose_prior_huber_delta, 1.345);
 
-  HBA hba(total_layer_num, data_path, thread_num);
+  if(pose_prior_stride < 1 || pose_prior_translation_sigma <= 0 || pose_prior_rotation_sigma <= 0)
+  {
+    ROS_ERROR("Invalid pose-prior configuration");
+    return 2;
+  }
+
+  nh.param<int>("window_size", WIN_SIZE, 10);
+  nh.param<int>("window_stride", GAP, 5);
+  nh.param<int>("inner_max_iterations", HBA_INNER_MAX_ITER, 10);
+  nh.param<double>("initial_damping", HBA_INITIAL_DAMPING, 0.01);
+  if(WIN_SIZE < 2 || GAP < 1 || GAP >= WIN_SIZE || HBA_INNER_MAX_ITER < 1 ||
+     !std::isfinite(HBA_INITIAL_DAMPING) || HBA_INITIAL_DAMPING <= 0)
+  {
+    ROS_ERROR("Invalid HBA window or LM settings");
+    return 2;
+  }
+  HBA hba(total_layer_num, data_path, thread_num, enable_pose_prior, pose_prior_stride,
+          pose_prior_translation_sigma, pose_prior_rotation_sigma, pose_prior_huber_delta);
+  for(auto& layer : hba.layers)
+  {
+    nh.param<int>("max_iterations", layer.max_iter, layer.max_iter);
+    nh.param<double>("downsample_size", layer.downsample_size, layer.downsample_size);
+    nh.param<double>("voxel_size", layer.voxel_size, layer.voxel_size);
+    nh.param<double>("eigen_ratio", layer.eigen_ratio, layer.eigen_ratio);
+    nh.param<double>("reject_ratio", layer.reject_ratio, layer.reject_ratio);
+    nh.param<double>("convergence_ratio", layer.convergence_ratio, layer.convergence_ratio);
+    nh.param<double>("keyframe_downsample_size", layer.keyframe_downsample_size, layer.keyframe_downsample_size);
+    if(layer.max_iter < 1 || !std::isfinite(layer.voxel_size) || layer.voxel_size <= 0 ||
+       !std::isfinite(layer.downsample_size) || layer.downsample_size < 0 ||
+       !(layer.eigen_ratio > 0 && layer.eigen_ratio <= 1) ||
+       !(layer.reject_ratio >= 0 && layer.reject_ratio < 1) ||
+       !(layer.convergence_ratio > 0 && layer.convergence_ratio < 1) ||
+       !std::isfinite(layer.keyframe_downsample_size) || layer.keyframe_downsample_size <= 0)
+    {
+      ROS_ERROR("Invalid HBA solver configuration");
+      return 2;
+    }
+  }
   for(int i = 0; i < total_layer_num-1; i++)
   {
     std::cout<<"---------------------"<<std::endl;
